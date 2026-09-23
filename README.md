@@ -12,6 +12,8 @@ dsh moves fast through 0.x releases and breaks plugin seams constantly. This ski
 
 Field-verified on the dsh-plugin-job-panel upgrade `0.1.5-rc.2 → 0.1.7-alpha.2` (2026-09-23): a rebuilt popover moved the React key from the row `<li>` to a component fiber, which this procedure located in minutes from installed-source evidence.
 
+**Re-runs are idempotent.** Every completed upgrade writes a marker — `META/dsh-upgrade.json` (the dsh version it was verified against, the plugin commit, the seam slugs, which verification rungs were reached). The next run checks the marker first: same dsh version and unchanged code → a minutes-long quick re-verify instead of a full seam scan; drifted or missing → the full procedure, and the marker gets rewritten. Markers gate the scan, never the verify.
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 ![verified](https://img.shields.io/badge/verified-dsh%200.1.7--alpha.2-blue)
 
@@ -21,11 +23,11 @@ Field-verified on the dsh-plugin-job-panel upgrade `0.1.5-rc.2 → 0.1.7-alpha.2
 |---|---|
 | §0 Principles | Evidence before edits; installed source = single truth; compatible fixes; small commits; never restart `dsh web` from inside it |
 | §0.5 Headless mode | Every user question answered by a pinned recommended default; outward actions (publish/push/restart) prepared but never auto-executed |
-| §1 Scope | Auto-inventory of installed third-party plugins and DSH-related skills |
+| §1 Scope | Auto-inventory of installed third-party plugins and DSH-related skills; marker triage partitions candidates into skip vs work before any scan |
 | §2 Source & versions | Locate the installed dsh, upstream tags, clone the repo if missing; side quest: re-verify the stale `dsh-plugin-dev-notes` skill itself |
-| §4 Per-plugin | Read diagnostics files first (which half broke?), find the plugin's verified baseline, diff only the touched dsh packages (`npm pack` old vs new), grep-verdict every seam |
+| §4 Per-plugin | Marker fast path first (FAST → quick re-verify / WIDE → all seams / FULL → everything), then evidence: diagnostics files (which half broke?), verified baseline, diff only the touched dsh packages (`npm pack` old vs new), grep-verdict every seam |
 | §5 Report | Failure scope / root cause with old-vs-new evidence / fix / how to verify |
-| §6 Wrap-up | Verification ladder (tests → bundle smoke → cookie-probed routes → click-test), per-fix commits, strongly-recommended `verified-dsh/vX.Y.Z` tag |
+| §6 Wrap-up | Verification ladder (tests → bundle smoke → cookie-probed routes → click-test), per-fix commits, the `META/dsh-upgrade.json` marker, strongly-recommended `verified-dsh/vX.Y.Z` tag |
 
 The full procedure lives in [SKILL.md](SKILL.md) — that file is the skill; this README is only the front door.
 

@@ -1,6 +1,6 @@
 ---
 name: dsh-plugin-upgrade
-description: "Step-by-step SOP for upgrading DeepSeek Harness (dsh) plugins after a dsh upgrade: inventory, seam re-verification against installed source, incremental fixes with per-fix commits, live verification, and version-sync tagging. Load when a plugin broke after a dsh upgrade, or the user asks to adapt/upgrade plugins (or DSH-related skills) to a new dsh version."
+description: "Step-by-step SOP for upgrading DeepSeek Harness (dsh) plugins after a dsh upgrade: inventory, seam re-verification against installed source, incremental fixes with per-fix commits, live verification, and version-sync tagging. Re-runs are idempotent: every completed upgrade leaves a META/dsh-upgrade.json marker, so a same-version re-run fast-verifies instead of re-scanning. Load when a plugin broke after a dsh upgrade, or the user asks to adapt/upgrade plugins (or DSH-related skills) to a new dsh version."
 ---
 
 # dsh Plugin Upgrade SOP
@@ -8,6 +8,12 @@ description: "Step-by-step SOP for upgrading DeepSeek Harness (dsh) plugins afte
 A repeatable procedure for making dsh plugins work again after dsh itself
 moves (breaking changes are frequent across 0.x releases). Field-verified on
 the dsh-plugin-job-panel upgrade `0.1.5-rc.2 → 0.1.7-alpha.2` (2026-09-23).
+
+**Idempotent by marker.** Every completed run writes `META/dsh-upgrade.json`
+(§6), and §4.0 checks it first — so re-running this SOP against the same dsh
+version fast-tracks through a quick re-verify instead of re-scanning seams
+from scratch. Introduced 2026-09-23; backfilled into the three field repos
+(dsh-plugin-job-panel, dsh-plugin-file-actions, dsh-plugin-dev-notes).
 
 ## 0. Principles (read first)
 
@@ -27,6 +33,10 @@ the dsh-plugin-job-panel upgrade `0.1.5-rc.2 → 0.1.7-alpha.2` (2026-09-23).
 6. The dsh web restart empties the job registry; bundle installs/removals do
    not hot-reload (restart needed); `lib/client.js` edits hot-swap via HMR;
    patch rows hot-reload.
+7. **Markers gate the scan, never the verify.** A completed run leaves a
+   `META/dsh-upgrade.json` marker (§4.0, §6) so a re-run doesn't re-scan —
+   but even a `FAST` marker still gets the quick re-verify. A marker is a
+   memo of what was verified, not a proof.
 
 ## 0.5 Headless mode
 
@@ -40,6 +50,7 @@ reconstruct every decision from the report alone.
 | Question (SOP ref) | Headless default |
 |---|---|
 | Which plugins to upgrade (§1) | Every **locally checked-out** third-party plugin in the profile that fails seam verification. Registry-only third-party plugins get `dsh plugin update <pkg> -w` (the author's fix) and a report if still broken — never hand-patch code you don't maintain. |
+| Marker fast path (§4.0) | Run the marker check for every candidate. `FAST` + green quick re-verify → skip and list in the report with the marker's dsh version; `WIDE`/`FULL` → proceed normally. |
 | Target version (§3) | The **installed, running** dsh version — fix what actually runs; note newer upstream tags in the report. |
 | Fix approach (§4.4) | Client half first, both-shape-compatible detection, one regression test per discovered shape. |
 | Version-sync tag (§6) | Yes — prefixed `verified-dsh/vX.Y.Z` + `META/dsh-baseline.txt` + README badge. |
@@ -62,6 +73,27 @@ with the concrete condition instead of guessing past it.
   ```
   Third-party plugins in the bundles list (`dsh-*`, `@*/dsh-*`) are the
   candidates; official `@deepseek-ai/*` entries are not.
+- **Marker triage before any scan** — an overview of what each checkout
+  already claims, so a re-run partitions into skip vs work:
+  ```sh
+  python3 - <<'EOF'
+  import json, os
+  root = os.path.expanduser("~/dev/dsh")   # the checkout root(s) §1's inventory lives in
+  for name in sorted(os.listdir(root)):
+      d = os.path.join(root, name)
+      if not os.path.isdir(d): continue
+      j, b = os.path.join(d, "META/dsh-upgrade.json"), os.path.join(d, "META/dsh-baseline.txt")
+      if os.path.exists(j):
+          m = json.load(open(j))
+          print(f"{name:26} marker  dsh={m.get('dshVersion')}  at={m.get('verifiedAt')}  head={m.get('pluginHead')}  backfilled={m.get('backfilled', False)}")
+      elif os.path.exists(b):
+          print(f"{name:26} baseline-only {open(b).read().strip()}")
+      else:
+          print(f"{name:26} no marker")
+  EOF
+  ```
+  A marker whose `dshVersion` equals the installed version is *not* yet a
+  skip — validity (head, tree, code drift, `backfilled`) is §4.0's call.
 
 ## 2. Locate dsh source and versions
 
@@ -93,7 +125,83 @@ scope, and whether the dev-notes skill needs a recheck. Ask: upgrade to
 
 ## 4. Per-plugin upgrade
 
-### 4.0 Evidence first (before reading plugin code)
+### 4.0 Marker fast path, then evidence (in that order)
+
+**Marker check** — the idempotency gate. Run it before any scan or diff; its
+verdict decides whether this is a re-run (fast/wide) or fresh work (full):
+
+```sh
+cd <plugin-checkout>
+python3 - <<'EOF'
+import json, pathlib, subprocess, sys
+
+def out(*a):
+    r = subprocess.run(a, capture_output=True, text=True)
+    return r.stdout.strip(), r.returncode
+
+def fail(r):
+    print("MARKER: FULL - " + r)
+    sys.exit(0)
+
+p = pathlib.Path("META/dsh-upgrade.json")
+if not p.exists():
+    fail("no marker (write one in §6)")
+m = json.loads(p.read_text())
+print(f"sopRev {m.get('sopRev')} | dsh {m.get('dshVersion')} | verified {m.get('verifiedAt')} | head {m.get('pluginHead')} | backfilled {m.get('backfilled', False)}")
+print("seams:", ", ".join(m.get("seams", [])) or "(none)")
+print("ladder:", json.dumps(m.get("verification", {}), sort_keys=True))
+
+inst, _ = out("dsh", "--version")
+if not inst:
+    inst, _ = out("node", "-e", "console.log(require(require('child_process').execSync('npm root -g').toString().trim()+'/@deepseek-ai/dsh/package.json').version)")
+if m.get("dshVersion") != inst:
+    fail(f"dsh moved: marker {m.get('dshVersion')} vs installed {inst}")
+
+head, rc = out("git", "rev-parse", "--short", "HEAD")
+if rc != 0:
+    fail("not a git checkout")
+dirty, _ = out("git", "status", "--porcelain", "--untracked-files=no")
+if dirty:
+    fail("tracked working tree dirty - commit or stash first")
+
+mh = m.get("pluginHead")
+if head != mh:
+    d, rc = out("git", "diff", "--name-only", f"{mh}..HEAD")
+    if rc != 0:
+        fail(f"cannot diff {mh}..HEAD (history rewritten?)")
+    ch = d.splitlines()
+    if not ch:
+        fail(f"head moved {mh} -> {head} but diff is empty (amended commit?)")
+    if not all(f.startswith("META/") for f in ch):
+        code = [f for f in ch if f.startswith(("lib/", "src/")) or f in ("package.json", "package-lock.json")]
+        if code:
+            fail("code changed since marker: " + ", ".join(code))
+        print("MARKER: WIDE - docs moved since marker: " + ", ".join(ch))
+        sys.exit(0)
+if m.get("backfilled"):
+    print("MARKER: WIDE - backfilled marker (one wide re-verify earns FAST)")
+    sys.exit(0)
+print("MARKER: FAST")
+EOF
+```
+
+| Output | Meaning | What runs |
+|---|---|---|
+| `FAST` | Same installed dsh, code unchanged since the marker commit | **Quick re-verify** (below) → report (§5) "already verified for dsh@X via marker, N seam rows skipped". Anything red → treat as `FULL`. |
+| `WIDE - backfilled` | Marker was reconstructed for pre-marker work, not earned | Quick re-verify with **every** seam row grep-verdicted (§4.2 grep list). All green → rewrite the marker without `backfilled` (§6). |
+| `WIDE - docs moved` | Only docs/README/META changed since the marker commit | Same as backfilled: every seam row. |
+| `FULL - <reason>` | No marker / dsh moved / code changed / dirty tree / not a checkout | The whole §4.1 → §4.4 procedure. Dirty: commit or stash first (§0.4). |
+| printed `sopRev` older than the current rev named in §6 | This SOP gained new classes of check after the marker was written | Act `WIDE` even though the machine fields match. |
+
+**Quick re-verify** (FAST and WIDE share it): `npm test` — or plain
+`node --test` when there is no test script (dsh-plugin-file-actions has
+none) — plus `node --check lib/*.js`; grep-verdict seam rows against the
+installed source (§4.2 grep list): 2–3 highest-drift rows when FAST, **every**
+row when WIDE; then the evidence cats below. Skill targets
+(dsh-plugin-dev-notes style): run their CHECKLIST gate instead of `npm test`.
+
+Evidence collection is three cats and happens **always**, even on the fast
+path:
 
 ```sh
 cat ~/.dsh/storages/<plugin>.json 2>/dev/null   # activation diagnostics, if the plugin writes them:
@@ -105,10 +213,13 @@ ls -la ~/.dsh/profiles/*/node_modules/<plugin>             # link: install still
 
 ### 4.1 Determine the plugin's verified baseline
 
-Check, in order: README "verified against dsh@..." line and version badge;
-the plugin's own **Version-sensitive seams table** (the
-dsh-plugin-dev-notes README convention — it IS the upgrade checklist); git
-tags and commit messages mentioning a dsh version; `package.json` notes.
+Check, in order: the `META/dsh-upgrade.json` marker if present (§4.0 — it is
+the machine-readable baseline: dsh version, head, seam slugs, ladder rungs);
+README "verified against dsh@..." line and version badge; the plugin's own
+**Version-sensitive seams table** (the dsh-plugin-dev-notes README
+convention — it IS the upgrade checklist); git tags and commit messages
+mentioning a dsh version; `package.json` notes. A `verified-dsh/*` tag whose
+tree also contains the marker is the strongest combination.
 
 ### 4.2 Baseline known → diff the dependency surface
 
@@ -153,11 +264,14 @@ surface: client half (DOM/fiber/module-table — drifts most) → host half
 
 Tell the user: failure scope (which half, which flows), root cause (what
 changed in dsh, with the old-vs-new evidence), how it was fixed, and how to
-verify. Ask what else to change; loop back to 4.x per item.
+verify. Ask what else to change; loop back to 4.x per item. Fast-path runs
+report the other direction: what the marker covered, what the quick
+re-verify re-checked, and the marker's ladder rungs.
 
 ## 6. Verification ladder and wrap-up
 
-Verify cheap → expensive, and record what was verified how:
+Verify cheap → expensive, and record what was verified how (these rungs are
+exactly what the marker's `verification` object records at wrap-up):
 
 1. `node --check` + full `npm test`.
 2. Bundle factory smoke in `vm` with a stubbed `window.__ModuleLoader__`.
@@ -173,6 +287,48 @@ Verify cheap → expensive, and record what was verified how:
 Wrap-up:
 
 - Working tree committed (per-fix commits already made).
+- **Write the upgrade marker** — this is what makes the next run cheap
+  (§4.0). Commit it together with the `META/dsh-baseline.txt` pin and the
+  README badge in the wrap-up docs commit, **before** the tag, so the tag's
+  tree contains the state it claims:
+  ```sh
+  cat > META/dsh-upgrade.json <<'EOF'
+  {
+    "sop": "dsh-plugin-upgrade",
+    "sopRev": 1,
+    "name": "dsh-plugin-job-panel",
+    "dshVersion": "0.1.7-alpha.2",
+    "verifiedAt": "2026-09-23",
+    "pluginHead": "5a21602",
+    "treeClean": true,
+    "seams": ["jobs-local.start-synchronous-run", "SubprocessHandle.collected-offset-readers", "client:popover-row-identity-JobItem-fiber"],
+    "verification": { "tests": true, "vmSmoke": true, "liveProbe": true, "clickTest": true },
+    "fixCommits": ["1724607 fix(client): track dsh 0.1.7 popover row identity (JobItem fiber) and guide entry id"],
+    "tag": "verified-dsh/v0.1.7-alpha.2"
+  }
+  EOF
+  git add META/dsh-upgrade.json META/dsh-baseline.txt
+  ```
+  Field notes:
+  - `sopRev` — the current SOP revision, **1**. Bump it here whenever this
+    SOP adds a new class of check, and in every marker you write; §4.0
+    degrades older-rev markers to WIDE instead of trusting them.
+  - `dshVersion` — the **installed, running** version (§2.1), never the
+    newest tag or the npm dist-tag (npm `latest` can trail the running
+    alpha channel).
+  - `pluginHead` — short HEAD at write time. The marker's own commit then
+    moves HEAD past it by exactly one META-only commit; §4.0 expects that
+    and does not degrade for it.
+  - `seams` — one slug per seam row of the plugin's seams table (§4.2), in
+    table order. Repos without a formal table: use the seams the tests pin
+    (dsh-plugin-file-actions style).
+  - `verification` — booleans only for ladder rungs (below) that actually
+    ran. Skill targets use their own keys (e.g. `checklist`).
+  - `backfilled: true` + `note` when reconstructing a marker for work done
+    before this field existed; §4.0 never FAST-skips those until one WIDE
+    re-verify earns the ladder and the marker is rewritten without it.
+  - Keep `META/dsh-baseline.txt` a **bare version string** — the
+    dsh-plugin-dev-notes release watcher machine-reads it.
 - **Version-sync tag — recommend it strongly.** Two options, ask the user:
   (a) tag the plugin with the dsh version it is verified against — note the
   namespace collides with the plugin's own semver tags; (b) preferred:
@@ -195,3 +351,6 @@ Wrap-up:
 | Restarting dsh web mid-session | Kills the agent's own conversation — hand it to the user |
 | Assuming the dev-notes skill is current | Its baseline may predate the target — run its CHECKLIST.md |
 | One giant commit | Per-fix commits; the tag then points at a reviewable diff |
+| Trusting the marker as proof | It gates the scan, never the verify — FAST still runs tests + seam spot-checks + evidence cats |
+| Comparing the marker to the newest tag or dist-tag | `dshVersion` must equal the **installed running** version (§2.1); npm `latest` can trail the running alpha |
+| Marker written but never committed | Uncommitted META edit = dirty tree = every future run lands FULL; commit it in the wrap-up docs commit, before the tag |

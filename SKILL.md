@@ -334,8 +334,23 @@ Wrap-up:
   namespace collides with the plugin's own semver tags; (b) preferred:
   prefixed tag `verified-dsh/vX.Y.Z` plus a `META/dsh-baseline.txt` file
   (what dsh-plugin-dev-notes does) plus the README badge.
+- **Plugin release version policy — ask the user before the first release.**
+  The SOP used to be silent here, and the semver-patch default silently
+  contradicted the author's intent on dsh-plugin-job-panel (2026-09-26):
+  - `independent-semver` (the long-standing default): the plugin versions
+    itself; dsh alignment lives only in the `verified-dsh/` tag +
+    `META/dsh-baseline.txt` + README badge.
+  - `mirror-dsh` (dsh-plugin-job-panel since `0.1.7-alpha.2`): the plugin's
+    own version **is** the verified dsh version — dissolves the (a)
+    namespace collision above, at the price of npm's no-republish rule: a
+    second plugin release against the same dsh version appends a prerelease
+    identifier (`0.1.7-alpha.2.1`; valid semver, sorts after `.2`).
+  - Record the choice as the optional marker field `"versionScheme"` so the
+    next run doesn't have to guess.
 - If the plugin is on npm: `npm publish` (2FA/OTP or granular token caveats
-  apply), then `npm view <pkg> version`.
+  apply), then `npm view <pkg> version`. A prerelease version refuses to
+  publish without an explicit dist-tag — pass `--tag latest` (the refusal
+  is a local pre-flight check; it errors before any network call).
 - Remind the user of the restart/refresh actually needed, and clean up
   `/tmp/dsh-upgrade`.
 
